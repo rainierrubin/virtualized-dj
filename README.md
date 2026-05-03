@@ -1,5 +1,7 @@
 # Generative DJ
 
+![Generative DJ — live AI DJ desktop app](docs/screenshot.png)
+
 An open-source live AI DJ desktop app. Generates instrumental tracks via [Suno V5.5](https://suno.com/) (through the [kie.ai](https://kie.ai/) API), then mixes them in real time with phrase-aligned auto-DJ transitions and dual-output audio routing — master to your speakers, cue to your headphones, like a hardware DJ controller in software.
 
 Built on **Next.js + Web Audio API + Electron**. The auto-DJ engine runs entirely client-side: beat tracking (Ellis 2007), Foote novelty structural segmentation, and energy-curve drop detection are implemented as a Web Worker that decodes the audio in-browser.
