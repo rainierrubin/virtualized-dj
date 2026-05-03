@@ -1,0 +1,57 @@
+# Secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# Electron build artefacts
+release/
+dist-electron/
+
+# Generated audio / cache
+outputs/
+stems/
+.cache/
+*.cache
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.ogg
+*.aac
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+.cursor/
+.claude/
+*.swp
+
+# Python (analysis prototype if anyone adds one)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

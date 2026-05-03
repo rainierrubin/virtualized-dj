@@ -1,0 +1,94 @@
+/**
+ * Server-only kie.ai Suno API client.
+ * Reads KIE_API_KEY from env. NEVER import from a client component.
+ */
+import "server-only";
+import type { SunoModel, SunoVariant, TaskRecord } from "./types";
+
+const BASE_URL = process.env.KIE_BASE_URL ?? "https://api.kie.ai";
+const API_KEY = process.env.KIE_API_KEY;
+
+if (!API_KEY) {
+  throw new Error("KIE_API_KEY is not set in environment");
+}
+
+const HEADERS = {
+  Authorization: `Bearer ${API_KEY}`,
+  "Content-Type": "application/json",
+} as const;
+
+export interface GenerateRequest {
+  style: string;
+  prompt: string;
+  title: string;
+  model: SunoModel;
+  styleWeight?: number;
+  weirdnessConstraint?: number;
+  audioWeight?: number;
+  negativeTags?: string;
+  personaId?: string;
+}
+
+export interface GenerateResponse {
+  taskId: string;
+}
+
+export async function submitGeneration(
+  req: GenerateRequest
+): Promise<GenerateResponse> {
+  const body = {
+    prompt: req.prompt,
+    style: req.style,
+    title: req.title,
+    customMode: true,
+    instrumental: true,
+    model: req.model,
+    callBackUrl: "https://example.com/kie-callback",
+    ...(req.styleWeight !== undefined && { styleWeight: req.styleWeight }),
+    ...(req.weirdnessConstraint !== undefined && {
+      weirdnessConstraint: req.weirdnessConstraint,
+    }),
+    ...(req.audioWeight !== undefined && { audioWeight: req.audioWeight }),
+    ...(req.negativeTags && { negativeTags: req.negativeTags }),
+    ...(req.personaId && { personaId: req.personaId }),
+  };
+
+  const resp = await fetch(`${BASE_URL}/api/v1/generate`, {
+    method: "POST",
+    headers: HEADERS,
+    body: JSON.stringify(body),
+  });
+
+  const json = await resp.json();
+  if (!resp.ok || json.code !== 200) {
+    throw new Error(
+      `kie.ai generate failed: code=${json.code} msg=${json.msg ?? resp.statusText}`
+    );
+  }
+  return { taskId: json.data.taskId };
+}
+
+export async function getTaskRecord(taskId: string): Promise<TaskRecord> {
+  const url = new URL(`${BASE_URL}/api/v1/generate/record-info`);
+  url.searchParams.set("taskId", taskId);
+
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: HEADERS.Authorization },
+    cache: "no-store",
+  });
+
+  const json = await resp.json();
+  if (!resp.ok || json.code !== 200) {
+    throw new Error(
+      `kie.ai record-info failed: code=${json.code} msg=${json.msg ?? resp.statusText}`
+    );
+  }
+  const data = json.data ?? {};
+  const variants: SunoVariant[] = data.response?.sunoData ?? [];
+  return {
+    taskId: data.taskId ?? taskId,
+    status: data.status ?? "PENDING",
+    variants,
+  };
+}

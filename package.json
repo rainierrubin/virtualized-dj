@@ -1,0 +1,50 @@
+{
+  "name": "generative-dj",
+  "version": "0.1.0",
+  "description": "Open-source live AI DJ — generates Suno V5_5 tracks via kie.ai and mixes them with phrase-aligned auto-DJ transitions and dual-output (master + cue) audio routing.",
+  "private": false,
+  "license": "MIT",
+  "main": "electron/main.cjs",
+  "homepage": "https://github.com/rainierrubin/generative-dj",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rainierrubin/generative-dj.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rainierrubin/generative-dj/issues"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "electron:dev": "NEXT_DEV_URL=http://localhost:3000 electron electron/main.cjs",
+    "electron:start": "node electron/run.cjs"
+  },
+  "dependencies": {
+    "fft.js": "^4.0.4",
+    "next": "16.2.4",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "electron": "^33.0.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.4",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  },
+  "keywords": [
+    "ai-music",
+    "auto-dj",
+    "suno",
+    "kie.ai",
+    "electron",
+    "nextjs",
+    "web-audio-api"
+  ]
+}
