@@ -1,6 +1,6 @@
-# Generative DJ
+# Virtualized DJ
 
-![Generative DJ — live AI DJ desktop app](docs/screenshot.png)
+![Virtualized DJ — live AI DJ desktop app](docs/screenshot.png)
 
 An open-source live AI DJ desktop app. Generates instrumental tracks via [Suno V5.5](https://suno.com/) (through the [kie.ai](https://kie.ai/) API), then mixes them in real time with phrase-aligned auto-DJ transitions and dual-output audio routing — master to your speakers, cue to your headphones, like a hardware DJ controller in software.
 
@@ -28,8 +28,8 @@ This repo is the **engine prototype** — a working dual-deck AI DJ tool with pr
 ## Quickstart (browser, dev)
 
 ```bash
-git clone https://github.com/rainierrubin/generative-dj.git
-cd generative-dj
+git clone https://github.com/rainierrubin/virtualized-dj.git
+cd virtualized-dj
 npm install
 
 # Set your kie.ai API key

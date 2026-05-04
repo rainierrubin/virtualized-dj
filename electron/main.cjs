@@ -108,7 +108,7 @@ async function createWindow() {
     minWidth: 1200,
     minHeight: 800,
     backgroundColor: "#07070a",
-    title: "Generative DJ",
+    title: "Virtualized DJ",
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

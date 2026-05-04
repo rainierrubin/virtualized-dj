@@ -1,17 +1,17 @@
 {
-  "name": "generative-dj",
+  "name": "virtualized-dj",
   "version": "0.1.0",
   "description": "Open-source live AI DJ — generates Suno V5_5 tracks via kie.ai and mixes them with phrase-aligned auto-DJ transitions and dual-output (master + cue) audio routing.",
   "private": false,
   "license": "MIT",
   "main": "electron/main.cjs",
-  "homepage": "https://github.com/rainierrubin/generative-dj",
+  "homepage": "https://github.com/rainierrubin/virtualized-dj",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rainierrubin/generative-dj.git"
+    "url": "git+https://github.com/rainierrubin/virtualized-dj.git"
   },
   "bugs": {
-    "url": "https://github.com/rainierrubin/generative-dj/issues"
+    "url": "https://github.com/rainierrubin/virtualized-dj/issues"
   },
   "scripts": {
     "dev": "next dev",

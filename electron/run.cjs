@@ -10,7 +10,7 @@ const root = path.join(__dirname, "..");
 const standalone = path.join(root, ".next", "standalone", "server.js");
 
 if (!fs.existsSync(standalone)) {
-  console.log("[generative-dj] no standalone build — running `next build`...");
+  console.log("[virtualized-dj] no standalone build — running `next build`...");
   const r = spawnSync("npx", ["next", "build"], { cwd: root, stdio: "inherit" });
   if (r.status !== 0) process.exit(r.status ?? 1);
 }
