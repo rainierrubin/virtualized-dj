@@ -454,6 +454,7 @@ export default function Page() {
   function useProgressiveAttach(
     elRef: RefObject<HTMLAudioElement | null>,
     proxied: string | null,
+    autoPlay: boolean,
   ) {
     const mse = isMseAudioSupported();
     useEffect(() => {
@@ -482,21 +483,46 @@ export default function Page() {
       } else {
         el.src = proxied;
       }
-      // Kick playback (silent on shadow channel via gain=0; audible on
-      // active channel). play() may reject if no user gesture has
-      // occurred yet — caller flow already handles the gesture path.
-      masterPipeline.resume();
-      el.play().catch(() => {});
+      if (autoPlay) {
+        // Master deck audio: kick playback (silent on shadow channel
+        // via gain=0; audible on active channel).
+        masterPipeline.resume();
+        el.play().catch(() => {});
+      }
       return () => {
         handle?.destroy();
       };
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [proxied]);
+    }, [proxied, autoPlay]);
   }
 
-  useProgressiveAttach(audioARef, aProxied);
-  useProgressiveAttach(audioBRef, bProxied);
-  useProgressiveAttach(cueAudioRef, cueProxied);
+  useProgressiveAttach(audioARef, aProxied, true);
+  useProgressiveAttach(audioBRef, bProxied, true);
+  // Cue preview: bind src so the waveform / title populate when the
+  // track loads, but DON'T auto-play. The auto-DJ effect runs the
+  // handleNextSong crossfade once cue reaches SUCCESS, which seeks +
+  // plays the shadow-channel master element. Letting the cue preview
+  // also play would route audio out of the default sink, doubling the
+  // audio with master.
+  useProgressiveAttach(cueAudioRef, cueProxied, false);
+
+  // Auto-DJ: as soon as the queued cue track is *streamable* (kie.ai
+  // has published a streamAudioUrl, which happens at TEXT_SUCCESS
+  // ~22s after submit), fire the immediate transition. We don't wait
+  // for SUCCESS because that takes ~3 minutes and the user wants the
+  // swap to happen the moment audio is available.
+  const autoTransitionedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!cue || !master) return;
+    const variant =
+      cue.variants[cue.activeVariantIndex] ?? cue.variants[0] ?? null;
+    if (!variant?.streamAudioUrl && !variant?.audioUrl) return;
+    if (autoTransitionedRef.current.has(cue.taskId)) return;
+    autoTransitionedRef.current.add(cue.taskId);
+    Promise.resolve().then(() => {
+      handleNextSong(true);
+    });
+  }, [cue, master]);
 
   function toggleIn(arr: string[], v: string): string[] {
     return arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
@@ -508,14 +534,12 @@ export default function Page() {
     setSubmitError(null);
     const trackNumber = nextTrack;
     const title = formatTrackTitle(sessionStart, trackNumber);
-    const prompt = structureToPrompt(structure);
-    const style = buildStyleString(
-      bpm,
-      genres,
-      styleTags,
-      elements,
-      customPrompt
-    );
+    const text = customPrompt.trim();
+    // In non-custom mode kie.ai uses `prompt` as a song description and
+    // auto-generates style, lyrics, and title — gives unique lyrics on
+    // every call instead of the same line repeating across tracks.
+    const prompt = text ? `${text}, ${bpm} bpm` : `${bpm} bpm`;
+    const style = prompt;
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
@@ -526,6 +550,7 @@ export default function Page() {
           title,
           model: "V5_5",
           instrumental,
+          customMode: false,
           styleWeight: 0.7,
           weirdnessConstraint: 0.3,
           audioWeight: 0.5,
@@ -619,7 +644,7 @@ export default function Page() {
   const MAX_BEAT_WAIT_MS = 10000;
   const TARGET_BEATS = 4;
 
-  async function handleNextSong() {
+  async function handleNextSong(immediate = false) {
     if (!cue || crossfading) return;
     const ma = activeMasterAudio();
     const sa = shadowMasterAudio();
@@ -640,37 +665,43 @@ export default function Page() {
     }
 
     // Choose strategy: planner if both analyses available, else fallback.
+    // When `immediate` is set (auto-DJ fires the moment the cue track
+    // becomes streamable), skip the phrase wait and any planner-induced
+    // delay — the user wants the swap to happen now, not at the next
+    // bar boundary.
     let cueStartSec = ca && Number.isFinite(ca.currentTime) ? ca.currentTime : 0;
-    if (master?.analysis && cue?.analysis && ma && !ma.paused) {
-      const plan = planTransition({
-        master: master.analysis,
-        cue: cue.analysis,
-        masterCurrentSec: ma.currentTime,
-        budgetSec: MAX_BEAT_WAIT_MS / 1000,
-      });
-      if (plan) {
-        console.log(
-          `transition plan: wait=${plan.waitSec.toFixed(2)}s ` +
-            `cut@${plan.masterCutSec.toFixed(2)}s (${plan.phasePref}-bar) ` +
-            `cueStart=${plan.cueStartSec.toFixed(2)}s — ${plan.reason}`
-        );
-        cueStartSec = plan.cueStartSec;
-        await new Promise<void>((r) => setTimeout(r, plan.waitSec * 1000));
-      } else {
-        console.log("no plan candidates — falling back to 4-beat detector");
+    if (!immediate) {
+      if (master?.analysis && cue?.analysis && ma && !ma.paused) {
+        const plan = planTransition({
+          master: master.analysis,
+          cue: cue.analysis,
+          masterCurrentSec: ma.currentTime,
+          budgetSec: MAX_BEAT_WAIT_MS / 1000,
+        });
+        if (plan) {
+          console.log(
+            `transition plan: wait=${plan.waitSec.toFixed(2)}s ` +
+              `cut@${plan.masterCutSec.toFixed(2)}s (${plan.phasePref}-bar) ` +
+              `cueStart=${plan.cueStartSec.toFixed(2)}s — ${plan.reason}`
+          );
+          cueStartSec = plan.cueStartSec;
+          await new Promise<void>((r) => setTimeout(r, plan.waitSec * 1000));
+        } else {
+          console.log("no plan candidates — falling back to 4-beat detector");
+          await waitForBeats(
+            masterPipeline.analyserRef,
+            TARGET_BEATS,
+            MAX_BEAT_WAIT_MS
+          );
+        }
+      } else if (ma && !ma.paused) {
+        // No analysis yet — fall back.
         await waitForBeats(
           masterPipeline.analyserRef,
           TARGET_BEATS,
           MAX_BEAT_WAIT_MS
         );
       }
-    } else if (ma && !ma.paused) {
-      // No analysis yet — fall back.
-      await waitForBeats(
-        masterPipeline.analyserRef,
-        TARGET_BEATS,
-        MAX_BEAT_WAIT_MS
-      );
     }
 
     // Seek shadow to cue's chosen start point. Range-supported source URLs
@@ -753,7 +784,8 @@ export default function Page() {
         </div>
       </header>
 
-      {/* ---------- decks row ---------- */}
+      {/* ---------- decks row (cue panel is visual only — auto-DJ
+           handles transition; user no longer interacts with it) ---------- */}
       <div className="grid grid-cols-[1fr_minmax(200px,15%)_1fr] gap-3 min-h-0">
         <Deck
           role="master"
@@ -771,17 +803,14 @@ export default function Page() {
           devices={deviceState.devices}
           masterDeviceId={masterDeviceId}
           masterDeviceIdSecondary={masterDeviceIdSecondary}
-          cueDeviceId={cueDeviceId}
           onMasterDeviceChange={setMasterDeviceId}
           onMasterDeviceSecondaryChange={setMasterDeviceIdSecondary}
-          onCueDeviceChange={setCueDeviceId}
           masterPlaying={masterPlaying}
           hasPrev={history.length > 0}
           hasNext={!!cue}
           onPrev={handlePrev}
           onPause={handlePause}
           onNext={handleNext}
-          onNextSong={handleNextSong}
           crossfading={crossfading}
         />
 
@@ -809,114 +838,68 @@ export default function Page() {
       />
 
       {/* ---------- generate strip ---------- */}
-      <section className="generate-strip">
-        {/* LEFT: scrollable pills + floating PROMPT box at bottom */}
-        <div className="flex flex-col flex-1 min-w-0 min-h-0 gap-2">
-          <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-3 pr-1">
-            <PillGroup
-              label="Genre"
-              options={GENRES}
-              selected={genres}
-              onToggle={(v) => setGenres(toggleIn(genres, v))}
-              extras={
-                <button
-                  type="button"
-                  onClick={() => setInstrumental((v) => !v)}
-                  aria-pressed={instrumental}
-                  title={
-                    instrumental
-                      ? "instrumental on — Suno will skip vocals"
-                      : "instrumental off — Suno may include vocals"
-                  }
-                  className={
-                    "shrink-0 px-2.5 py-1 text-[11px] leading-none rounded-md border whitespace-nowrap cursor-pointer select-none transition-colors " +
-                    (instrumental
-                      ? "border-orange-400 bg-orange-400/10 text-orange-400 shadow-[0_0_8px_rgba(255,106,61,0.25)]"
-                      : "border-zinc-700 bg-zinc-800/60 text-zinc-400 hover:border-zinc-500 hover:text-zinc-100")
-                  }
-                >
-                  instrumental
-                </button>
+      <section className="generate-strip !flex-col !items-center !justify-center gap-3">
+        <textarea
+          className="prompt-textarea"
+          style={{ maxWidth: 440, resize: "none" }}
+          rows={2}
+          value={customPrompt}
+          onChange={(e) => setCustomPrompt(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter alone submits; Shift+Enter still inserts a newline.
+            if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+              e.preventDefault();
+              if (!submitting && customPrompt.trim().length > 0) {
+                handleGenerate();
               }
-            />
-            <PillGroup
-              label="Style"
-              options={STYLES}
-              selected={styleTags}
-              onToggle={(v) => setStyleTags(toggleIn(styleTags, v))}
-            />
-            <PillGroup
-              label="Elements"
-              options={ELEMENTS}
-              selected={elements}
-              onToggle={(v) => setElements(toggleIn(elements, v))}
-            />
-          </div>
-          <div className="flex flex-col gap-1 shrink-0">
+            }
+          }}
+          placeholder="describe the track — e.g. lo-fi chill beat, mellow piano"
+        />
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setInstrumental((v) => !v)}
+            aria-pressed={instrumental}
+            title={
+              instrumental
+                ? "instrumental on — Suno will skip vocals"
+                : "instrumental off — Suno may include vocals"
+            }
+            className={
+              "shrink-0 px-3 py-1.5 text-[11px] leading-none rounded-md border whitespace-nowrap cursor-pointer select-none transition-colors " +
+              (instrumental
+                ? "border-orange-400 bg-orange-400/10 text-orange-400 shadow-[0_0_8px_rgba(255,106,61,0.25)]"
+                : "border-zinc-700 bg-zinc-800/60 text-zinc-400 hover:border-zinc-500 hover:text-zinc-100")
+            }
+          >
+            instrumental
+          </button>
+          <div className="flex items-center gap-2">
             <span className="font-mono text-[10px] tracking-[0.18em] uppercase text-zinc-500">
-              PROMPT
+              BPM
             </span>
-            <input
-              type="text"
-              className="prompt-textarea"
-              value={customPrompt}
-              onChange={(e) => setCustomPrompt(e.target.value)}
-              placeholder="optional free-form prompt (combines with pills, or replaces them when no pills are selected)"
-            />
+            <select
+              className="dj-select bpm-select"
+              value={bpm}
+              onChange={(e) => setBpm(parseInt(e.target.value, 10))}
+            >
+              {BPM_OPTIONS.map((b) => (
+                <option key={b} value={b}>
+                  {b}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
-
-        {/* RIGHT: STRUCTURE label + BPM + GENERATE on top row, then dropdowns */}
-        <div className="flex flex-col flex-1 min-w-0 gap-1.5 min-h-0">
-          <div className="flex items-center justify-between gap-3 shrink-0">
-            <label className="deck-label">STRUCTURE</label>
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => setUseTextStructure((v) => !v)}
-                className="pill pill-button"
-                title={
-                  useTextStructure
-                    ? "switch back to dropdown menus"
-                    : "switch to free-text inputs"
-                }
-              >
-                {useTextStructure ? "TEXT" : "MENU"}
-              </button>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-[10px] tracking-[0.18em] uppercase text-zinc-500">
-                  BPM
-                </span>
-                <select
-                  className="dj-select bpm-select"
-                  value={bpm}
-                  onChange={(e) => setBpm(parseInt(e.target.value, 10))}
-                >
-                  {BPM_OPTIONS.map((b) => (
-                    <option key={b} value={b}>
-                      {b}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <button
-                type="button"
-                onClick={handleGenerate}
-                disabled={
-                  submitting || (genres.length === 0 && styleTags.length === 0)
-                }
-                className="btn-generate"
-              >
-                {submitting ? "…" : "▶ GENERATE"}
-              </button>
-            </div>
-          </div>
-          <StructurePicker
-            structure={structure}
-            onChange={setStructure}
-            useText={useTextStructure}
-          />
-        </div>
+        <button
+          type="button"
+          onClick={handleGenerate}
+          disabled={submitting || customPrompt.trim().length === 0}
+          className="btn-generate"
+        >
+          {submitting ? "…" : "▶ GENERATE"}
+        </button>
       </section>
 
       {/* ---------- always-mounted hidden audio elements ----------
@@ -1262,35 +1245,28 @@ function MixerColumn(props: {
   devices: AudioOutputDevice[];
   masterDeviceId: string | null;
   masterDeviceIdSecondary: string | null;
-  cueDeviceId: string | null;
   onMasterDeviceChange: (id: string | null) => void;
   onMasterDeviceSecondaryChange: (id: string | null) => void;
-  onCueDeviceChange: (id: string | null) => void;
   masterPlaying: boolean;
   hasPrev: boolean;
   hasNext: boolean;
   onPrev: () => void;
   onPause: () => void;
   onNext: () => void;
-  onNextSong: () => void;
   crossfading: boolean;
 }) {
   const {
     devices,
     masterDeviceId,
     masterDeviceIdSecondary,
-    cueDeviceId,
     onMasterDeviceChange,
     onMasterDeviceSecondaryChange,
-    onCueDeviceChange,
     masterPlaying,
     hasPrev,
     hasNext,
     onPrev,
     onPause,
     onNext,
-    onNextSong,
-    crossfading,
   } = props;
 
   return (
@@ -1302,12 +1278,6 @@ function MixerColumn(props: {
         onChange={onMasterDeviceChange}
         secondaryDeviceId={masterDeviceIdSecondary}
         onSecondaryChange={onMasterDeviceSecondaryChange}
-      />
-      <OutputBox
-        role="cue"
-        devices={devices}
-        deviceId={cueDeviceId}
-        onChange={onCueDeviceChange}
       />
       <div className="transport-row">
         <button
@@ -1355,18 +1325,6 @@ function MixerColumn(props: {
           </svg>
         </button>
       </div>
-      <button
-        type="button"
-        onClick={onNextSong}
-        disabled={!hasNext || crossfading}
-        className="next-song-btn"
-        title="Crossfade to next song over ~4s"
-      >
-        {crossfading ? "▸ CROSSFADING…" : "▸ NEXT SONG"}
-        <span className="text-[9px] text-fg-dim mt-0.5 normal-case tracking-wider">
-          {crossfading ? "easing master out" : "intelligent transition"}
-        </span>
-      </button>
     </div>
   );
 }
@@ -1524,7 +1482,7 @@ function OutputBox({
   return (
     <div className={`mixer-box mixer-box-${role}`}>
       <span className={`deck-label deck-label-${role}`}>
-        {role === "master" ? "MASTER OUT" : "CUE OUT"}
+        {role === "master" ? "AUDIO OUTPUT" : "CUE OUT"}
       </span>
       <select
         className={`dj-select dj-select-${role} w-full`}

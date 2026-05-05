@@ -24,6 +24,13 @@ export interface GenerateRequest {
   model: SunoModel;
   /** If true, Suno generates a vocals-free track. Default false. */
   instrumental?: boolean;
+  /**
+   * If true (default), customMode is on: prompt is treated as exact
+   * lyrics when instrumental is false, style + title are required.
+   * If false, kie.ai auto-generates lyrics, style, and title from a
+   * single description prompt — gives unique lyrics per call.
+   */
+  customMode?: boolean;
   styleWeight?: number;
   weirdnessConstraint?: number;
   audioWeight?: number;
@@ -38,11 +45,13 @@ export interface GenerateResponse {
 export async function submitGeneration(
   req: GenerateRequest
 ): Promise<GenerateResponse> {
+  const customMode = req.customMode ?? true;
   const body = {
     prompt: req.prompt,
-    style: req.style,
-    title: req.title,
-    customMode: true,
+    // style + title are only meaningful in custom mode; in non-custom
+    // mode kie.ai auto-derives them from the prompt.
+    ...(customMode && { style: req.style, title: req.title }),
+    customMode,
     instrumental: req.instrumental ?? false,
     model: req.model,
     callBackUrl: "https://example.com/kie-callback",
