@@ -19,12 +19,42 @@ export interface DeckAudioPipeline {
   resume: () => void;
 }
 
+/**
+ * Per-deck signal chain exposed for the transition engine to schedule
+ * AudioParam ramps directly. Each channel passes through:
+ *   source → lowShelf (150 Hz, gain 0 dB by default)
+ *          → lpf (lowpass, frequency 22 kHz, Q 1)
+ *          → gain
+ *          → analyser
+ *          → ctx.destination
+ * The lowShelf and lpf are inert when set to defaults; the transition
+ * engine drives them for bass-swap blends and filter-sweep cuts.
+ */
+export interface DeckChainNodes {
+  gain: GainNode;
+  lowShelf: BiquadFilterNode;
+  lpf: BiquadFilterNode;
+}
+
+export interface DualPipelineNodes {
+  ctx: AudioContext;
+  A: DeckChainNodes;
+  B: DeckChainNodes;
+}
+
 export interface DualPipeline {
   analyserRef: RefObject<AnalyserNode | null>;
   ready: boolean;
   error: string | null;
   resume: () => void;
   setActiveChannel: (channel: "A" | "B", instant?: boolean) => void;
+  /**
+   * Returns the AudioContext + the per-channel filter chain so the
+   * transition engine can schedule custom AudioParam automations
+   * (e.g., low-shelf bass swap, lowpass sweep). Null until the
+   * pipeline is initialised.
+   */
+  nodes: () => DualPipelineNodes | null;
 }
 
 interface ContextWithSink extends AudioContext {
@@ -151,6 +181,10 @@ export function useMasterDualPipeline(
   const ctxRef = useRef<ContextWithSink | null>(null);
   const gainARef = useRef<GainNode | null>(null);
   const gainBRef = useRef<GainNode | null>(null);
+  const lowShelfARef = useRef<BiquadFilterNode | null>(null);
+  const lowShelfBRef = useRef<BiquadFilterNode | null>(null);
+  const lpfARef = useRef<BiquadFilterNode | null>(null);
+  const lpfBRef = useRef<BiquadFilterNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const secondaryDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const secondaryAudioRef = useRef<AudioElementWithSink | null>(null);
@@ -172,6 +206,26 @@ export function useMasterDualPipeline(
       const sourceB = ctx.createMediaElementSource(b);
       const gainA = ctx.createGain();
       const gainB = ctx.createGain();
+      // Per-deck low-shelf for bass-swap blends. Gain stays at 0 dB
+      // unless the transition engine ramps it (typically -40 dB → 0 or
+      // 0 → -40 dB across the crossfade window).
+      const lowShelfA = ctx.createBiquadFilter();
+      const lowShelfB = ctx.createBiquadFilter();
+      for (const ls of [lowShelfA, lowShelfB]) {
+        ls.type = "lowshelf";
+        ls.frequency.value = 150;
+        ls.gain.value = 0;
+      }
+      // Per-deck low-pass filter for sweep transitions. Stays wide-open
+      // (22 kHz) by default; the transition engine sweeps frequency
+      // exponentially down to ~250 Hz for a "filter out" effect.
+      const lpfA = ctx.createBiquadFilter();
+      const lpfB = ctx.createBiquadFilter();
+      for (const f of [lpfA, lpfB]) {
+        f.type = "lowpass";
+        f.frequency.value = 22000;
+        f.Q.value = 1;
+      }
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.75;
@@ -179,9 +233,14 @@ export function useMasterDualPipeline(
       gainA.gain.value = channelRef.current === "A" ? 1 : 0;
       gainB.gain.value = channelRef.current === "B" ? 1 : 0;
 
-      sourceA.connect(gainA);
-      sourceB.connect(gainB);
+      // sourceA → lowShelfA → lpfA → gainA → analyser
+      sourceA.connect(lowShelfA);
+      lowShelfA.connect(lpfA);
+      lpfA.connect(gainA);
       gainA.connect(analyser);
+      sourceB.connect(lowShelfB);
+      lowShelfB.connect(lpfB);
+      lpfB.connect(gainB);
       gainB.connect(analyser);
       analyser.connect(ctx.destination);
 
@@ -198,6 +257,10 @@ export function useMasterDualPipeline(
       ctxRef.current = ctx;
       gainARef.current = gainA;
       gainBRef.current = gainB;
+      lowShelfARef.current = lowShelfA;
+      lowShelfBRef.current = lowShelfB;
+      lpfARef.current = lpfA;
+      lpfBRef.current = lpfB;
       analyserRef.current = analyser;
       secondaryDestRef.current = secondaryDest;
       secondaryAudioRef.current = secondaryAudio;
@@ -230,6 +293,10 @@ export function useMasterDualPipeline(
       ctxRef.current = null;
       gainARef.current = null;
       gainBRef.current = null;
+      lowShelfARef.current = null;
+      lowShelfBRef.current = null;
+      lpfARef.current = null;
+      lpfBRef.current = null;
       analyserRef.current = null;
       secondaryDestRef.current = null;
       secondaryAudioRef.current = null;
@@ -329,8 +396,24 @@ export function useMasterDualPipeline(
     }
   }, []);
 
+  const nodes = useCallback((): DualPipelineNodes | null => {
+    const ctx = ctxRef.current;
+    const gA = gainARef.current;
+    const gB = gainBRef.current;
+    const lsA = lowShelfARef.current;
+    const lsB = lowShelfBRef.current;
+    const lpA = lpfARef.current;
+    const lpB = lpfBRef.current;
+    if (!ctx || !gA || !gB || !lsA || !lsB || !lpA || !lpB) return null;
+    return {
+      ctx,
+      A: { gain: gA, lowShelf: lsA, lpf: lpA },
+      B: { gain: gB, lowShelf: lsB, lpf: lpB },
+    };
+  }, []);
+
   return useMemo(
-    () => ({ analyserRef, ready, error, resume, setActiveChannel }),
-    [ready, error, resume, setActiveChannel]
+    () => ({ analyserRef, ready, error, resume, setActiveChannel, nodes }),
+    [ready, error, resume, setActiveChannel, nodes]
   );
 }

@@ -27,6 +27,10 @@ import {
   attachProgressiveStream,
   isMseAudioSupported,
 } from "@/lib/progressive-stream";
+import {
+  chooseTransition,
+  executeTransition,
+} from "@/lib/transition-engine";
 
 // ---------- pill option catalogues ----------
 const GENRES = [
@@ -714,9 +718,30 @@ export default function Page() {
       }
     }
 
-    // Channel swap.
-    const nextChannel = masterChannel === "A" ? "B" : "A";
-    masterPipeline.setActiveChannel(nextChannel);
+    // Pick + run the genre/section-aware transition. The engine
+    // schedules ramps on the per-deck gain / lowShelf / lpf nodes
+    // directly so the swap is glitch-free regardless of the
+    // main-thread frame rate.
+    const nextChannel: "A" | "B" = masterChannel === "A" ? "B" : "A";
+    const nodes = masterPipeline.nodes();
+    const style = chooseTransition({
+      master: master?.analysis ?? null,
+      cue: cue?.analysis ?? null,
+      cueStartSec,
+      bpmHint: master?.analysis?.bpm ?? cue?.analysis?.bpm ?? 120,
+    });
+    console.log(`[transition] style=${style.kind} reason=${style.reason}`);
+    if (nodes) {
+      await executeTransition({
+        style,
+        pipeline: nodes,
+        fromChannel: masterChannel,
+        toChannel: nextChannel,
+      });
+    } else {
+      // Pipeline not initialised — fall back to the legacy ramp.
+      masterPipeline.setActiveChannel(nextChannel);
+    }
     setMasterChannel(nextChannel);
 
     if (ca) {
