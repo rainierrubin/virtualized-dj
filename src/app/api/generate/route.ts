@@ -38,6 +38,7 @@ export async function POST(req: Request) {
     prompt,
     title,
     model,
+    instrumental: body.instrumental === true,
     styleWeight: clamp01(body.styleWeight),
     weirdnessConstraint: clamp01(body.weirdnessConstraint),
     audioWeight: clamp01(body.audioWeight),

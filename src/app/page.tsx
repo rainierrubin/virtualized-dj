@@ -23,6 +23,10 @@ import { useDeckAudio, useMasterDualPipeline } from "@/lib/deck-audio";
 import type { TrackAnalysis } from "@/lib/analysis-types";
 import { analyzeAudioUrl } from "@/lib/audio-analysis";
 import { planTransition } from "@/lib/transition-planner";
+import {
+  attachProgressiveStream,
+  isMseAudioSupported,
+} from "@/lib/progressive-stream";
 
 // ---------- pill option catalogues ----------
 const GENRES = [
@@ -278,6 +282,7 @@ export default function Page() {
   const [genres, setGenres] = useState<string[]>(DEFAULT_GENRES);
   const [styleTags, setStyleTags] = useState<string[]>(DEFAULT_STYLES);
   const [elements, setElements] = useState<string[]>(DEFAULT_ELEMENTS);
+  const [instrumental, setInstrumental] = useState<boolean>(false);
   const [customPrompt, setCustomPrompt] = useState<string>("");
   const [structure, setStructure] = useState<Structure>(DEFAULT_STRUCTURE);
   const [useTextStructure, setUseTextStructure] = useState<boolean>(false);
@@ -297,6 +302,8 @@ export default function Page() {
   const [masterChannel, setMasterChannel] = useState<"A" | "B">("A");
 
   const [masterDeviceId, setMasterDeviceId] = useState<string | null>(null);
+  const [masterDeviceIdSecondary, setMasterDeviceIdSecondary] =
+    useState<string | null>(null);
   const [cueDeviceId, setCueDeviceId] = useState<string | null>(null);
   const { state: deviceState, requestPermission } = useAudioOutputDevices();
 
@@ -304,7 +311,8 @@ export default function Page() {
     audioARef,
     audioBRef,
     masterChannel,
-    masterDeviceId
+    masterDeviceId,
+    masterDeviceIdSecondary
   );
   const cuePipeline = useDeckAudio(cueAudioRef, cueDeviceId);
 
@@ -318,6 +326,7 @@ export default function Page() {
   const [cuePlaying, setCuePlaying] = useState(false);
   const [cueTime, setCueTime] = useState(0);
   const [cueDuration, setCueDuration] = useState(0);
+
 
   const masterPlaying = masterChannel === "A" ? aPlaying : bPlaying;
   const masterTime = masterChannel === "A" ? aTime : bTime;
@@ -403,25 +412,91 @@ export default function Page() {
     setCueDuration(0);
   }, [cueStream]);
 
-  // Whenever a master audio element gets a new src, ensure it's playing
-  // (silently if it's the shadow channel; audibly if it's the active
-  // channel). autoPlay handles initial load; this catches subsequent
-  // src changes (e.g., a new cue track loading into the shadow).
-  useEffect(() => {
-    if (!aProxied) return;
-    const a = audioARef.current;
-    if (!a) return;
-    masterPipeline.resume();
-    a.play().catch(() => {});
-  }, [aProxied, masterPipeline]);
+  // ── Progressive (MSE) playback ─────────────────────────────────
+  //
+  // We manage the audio element's source via Media Source Extensions
+  // instead of binding `<audio src>` directly. The MSE module fetches
+  // kie.ai's chunked stream, appends bytes to a SourceBuffer, polls
+  // for SUCCESS when the chunked response closes early, and refetches
+  // the remaining bytes to extend the buffer. Result: the audio
+  // element never sees a premature `ended` and plays the full track
+  // through, no reload glitch.
+  //
+  // For browsers that don't support MSE for `audio/mpeg` we fall back
+  // to direct src binding.
+  const masterRef = useRef(master);
+  const cueRef = useRef(cue);
+  const masterChannelRef = useRef(masterChannel);
+  masterRef.current = master;
+  cueRef.current = cue;
+  masterChannelRef.current = masterChannel;
 
-  useEffect(() => {
-    if (!bProxied) return;
-    const b = audioBRef.current;
-    if (!b) return;
-    masterPipeline.resume();
-    b.play().catch(() => {});
-  }, [bProxied, masterPipeline]);
+  const deckOnElement = useCallback(
+    (el: HTMLAudioElement | null): "master" | "cue" | null => {
+      if (!el) return null;
+      const mc = masterChannelRef.current;
+      if (el === audioARef.current) return mc === "A" ? "master" : "cue";
+      if (el === audioBRef.current) return mc === "A" ? "cue" : "master";
+      if (el === cueAudioRef.current) return "cue";
+      return null;
+    },
+    [],
+  );
+
+  const isDeckComplete = useCallback(
+    async (deckKind: "master" | "cue"): Promise<boolean> => {
+      const deck = deckKind === "master" ? masterRef.current : cueRef.current;
+      return !!deck && deck.status === "SUCCESS";
+    },
+    [],
+  );
+
+  function useProgressiveAttach(
+    elRef: RefObject<HTMLAudioElement | null>,
+    proxied: string | null,
+  ) {
+    const mse = isMseAudioSupported();
+    useEffect(() => {
+      const el = elRef.current;
+      if (!el) return;
+      if (!proxied) {
+        try {
+          el.removeAttribute("src");
+          el.load();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      let handle: ReturnType<typeof attachProgressiveStream> | null = null;
+      if (mse) {
+        handle = attachProgressiveStream({
+          url: proxied,
+          audio: el,
+          isComplete: async () => {
+            const kind = deckOnElement(el);
+            if (!kind) return false;
+            return isDeckComplete(kind);
+          },
+        });
+      } else {
+        el.src = proxied;
+      }
+      // Kick playback (silent on shadow channel via gain=0; audible on
+      // active channel). play() may reject if no user gesture has
+      // occurred yet — caller flow already handles the gesture path.
+      masterPipeline.resume();
+      el.play().catch(() => {});
+      return () => {
+        handle?.destroy();
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [proxied]);
+  }
+
+  useProgressiveAttach(audioARef, aProxied);
+  useProgressiveAttach(audioBRef, bProxied);
+  useProgressiveAttach(cueAudioRef, cueProxied);
 
   function toggleIn(arr: string[], v: string): string[] {
     return arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
@@ -450,6 +525,7 @@ export default function Page() {
           prompt,
           title,
           model: "V5_5",
+          instrumental,
           styleWeight: 0.7,
           weirdnessConstraint: 0.3,
           audioWeight: 0.5,
@@ -694,8 +770,10 @@ export default function Page() {
         <MixerColumn
           devices={deviceState.devices}
           masterDeviceId={masterDeviceId}
+          masterDeviceIdSecondary={masterDeviceIdSecondary}
           cueDeviceId={cueDeviceId}
           onMasterDeviceChange={setMasterDeviceId}
+          onMasterDeviceSecondaryChange={setMasterDeviceIdSecondary}
           onCueDeviceChange={setCueDeviceId}
           masterPlaying={masterPlaying}
           hasPrev={history.length > 0}
@@ -740,6 +818,26 @@ export default function Page() {
               options={GENRES}
               selected={genres}
               onToggle={(v) => setGenres(toggleIn(genres, v))}
+              extras={
+                <button
+                  type="button"
+                  onClick={() => setInstrumental((v) => !v)}
+                  aria-pressed={instrumental}
+                  title={
+                    instrumental
+                      ? "instrumental on — Suno will skip vocals"
+                      : "instrumental off — Suno may include vocals"
+                  }
+                  className={
+                    "shrink-0 px-2.5 py-1 text-[11px] leading-none rounded-md border whitespace-nowrap cursor-pointer select-none transition-colors " +
+                    (instrumental
+                      ? "border-orange-400 bg-orange-400/10 text-orange-400 shadow-[0_0_8px_rgba(255,106,61,0.25)]"
+                      : "border-zinc-700 bg-zinc-800/60 text-zinc-400 hover:border-zinc-500 hover:text-zinc-100")
+                  }
+                >
+                  instrumental
+                </button>
+              }
             />
             <PillGroup
               label="Style"
@@ -827,8 +925,6 @@ export default function Page() {
           Cue element on its own pipeline → cue sink for headphone preview. */}
       <audio
         ref={audioARef}
-        src={aProxied ?? undefined}
-        autoPlay={!!aProxied}
         preload="auto"
         crossOrigin="anonymous"
         className="audio-hidden"
@@ -844,8 +940,6 @@ export default function Page() {
       />
       <audio
         ref={audioBRef}
-        src={bProxied ?? undefined}
-        autoPlay={!!bProxied}
         preload="auto"
         crossOrigin="anonymous"
         className="audio-hidden"
@@ -861,7 +955,6 @@ export default function Page() {
       />
       <audio
         ref={cueAudioRef}
-        src={cueProxied ?? undefined}
         preload="auto"
         crossOrigin="anonymous"
         className="audio-hidden"
@@ -1168,8 +1261,10 @@ function waitForBeats(
 function MixerColumn(props: {
   devices: AudioOutputDevice[];
   masterDeviceId: string | null;
+  masterDeviceIdSecondary: string | null;
   cueDeviceId: string | null;
   onMasterDeviceChange: (id: string | null) => void;
+  onMasterDeviceSecondaryChange: (id: string | null) => void;
   onCueDeviceChange: (id: string | null) => void;
   masterPlaying: boolean;
   hasPrev: boolean;
@@ -1183,8 +1278,10 @@ function MixerColumn(props: {
   const {
     devices,
     masterDeviceId,
+    masterDeviceIdSecondary,
     cueDeviceId,
     onMasterDeviceChange,
+    onMasterDeviceSecondaryChange,
     onCueDeviceChange,
     masterPlaying,
     hasPrev,
@@ -1203,6 +1300,8 @@ function MixerColumn(props: {
         devices={devices}
         deviceId={masterDeviceId}
         onChange={onMasterDeviceChange}
+        secondaryDeviceId={masterDeviceIdSecondary}
+        onSecondaryChange={onMasterDeviceSecondaryChange}
       />
       <OutputBox
         role="cue"
@@ -1280,11 +1379,13 @@ function PillGroup({
   options,
   selected,
   onToggle,
+  extras,
 }: {
   label: string;
   options: readonly string[];
   selected: string[];
   onToggle: (v: string) => void;
+  extras?: React.ReactNode;
 }) {
   return (
     <div className="flex flex-col gap-2">
@@ -1313,6 +1414,7 @@ function PillGroup({
             </button>
           );
         })}
+        {extras}
       </div>
     </div>
   );
@@ -1405,12 +1507,20 @@ function OutputBox({
   devices,
   deviceId,
   onChange,
+  secondaryDeviceId,
+  onSecondaryChange,
 }: {
   role: Role;
   devices: AudioOutputDevice[];
   deviceId: string | null;
   onChange: (id: string | null) => void;
+  secondaryDeviceId?: string | null;
+  onSecondaryChange?: (id: string | null) => void;
 }) {
+  const showSecondary =
+    role === "master" && typeof onSecondaryChange === "function";
+  // Don't let the user pick the same device for primary and secondary.
+  const secondaryOptions = devices.filter((d) => d.deviceId !== deviceId);
   return (
     <div className={`mixer-box mixer-box-${role}`}>
       <span className={`deck-label deck-label-${role}`}>
@@ -1419,7 +1529,20 @@ function OutputBox({
       <select
         className={`dj-select dj-select-${role} w-full`}
         value={deviceId ?? ""}
-        onChange={(e) => onChange(e.target.value || null)}
+        onChange={(e) => {
+          const next = e.target.value || null;
+          onChange(next);
+          // If primary now equals current secondary, clear secondary.
+          if (
+            showSecondary &&
+            next &&
+            secondaryDeviceId &&
+            next === secondaryDeviceId &&
+            onSecondaryChange
+          ) {
+            onSecondaryChange(null);
+          }
+        }}
       >
         <option value="">DEFAULT (SYSTEM)</option>
         {devices.map((d) => (
@@ -1428,6 +1551,21 @@ function OutputBox({
           </option>
         ))}
       </select>
+      {showSecondary ? (
+        <select
+          className={`dj-select dj-select-${role} w-full`}
+          value={secondaryDeviceId ?? ""}
+          onChange={(e) => onSecondaryChange?.(e.target.value || null)}
+          title="Optional second output — master mix plays out of both"
+        >
+          <option value="">+ ADD SECOND OUTPUT (OPTIONAL)</option>
+          {secondaryOptions.map((d) => (
+            <option key={d.deviceId} value={d.deviceId}>
+              {d.label || `Output ${d.deviceId.slice(0, 6)}`}
+            </option>
+          ))}
+        </select>
+      ) : null}
     </div>
   );
 }

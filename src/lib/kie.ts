@@ -22,6 +22,8 @@ export interface GenerateRequest {
   prompt: string;
   title: string;
   model: SunoModel;
+  /** If true, Suno generates a vocals-free track. Default false. */
+  instrumental?: boolean;
   styleWeight?: number;
   weirdnessConstraint?: number;
   audioWeight?: number;
@@ -41,7 +43,7 @@ export async function submitGeneration(
     style: req.style,
     title: req.title,
     customMode: true,
-    instrumental: true,
+    instrumental: req.instrumental ?? false,
     model: req.model,
     callBackUrl: "https://example.com/kie-callback",
     ...(req.styleWeight !== undefined && { styleWeight: req.styleWeight }),

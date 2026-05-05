@@ -131,16 +131,29 @@ export function useDeckAudio(
  * the next track). Use setActiveChannel("B") to swap audibility instantly
  * with no audio element reload.
  */
+type AudioElementWithSink = HTMLAudioElement & {
+  setSinkId?: (id: string) => Promise<void>;
+};
+
 export function useMasterDualPipeline(
   audioARef: RefObject<HTMLAudioElement | null>,
   audioBRef: RefObject<HTMLAudioElement | null>,
   initialChannel: "A" | "B",
-  deviceId: string | null
+  deviceId: string | null,
+  /**
+   * Optional second physical output. When set, the master mix is also
+   * played out of this device by tapping the analyser into a
+   * MediaStreamDestination and feeding a hidden HTMLAudioElement that
+   * has setSinkId pinned to this device. Null = single output (default).
+   */
+  secondaryDeviceId: string | null = null
 ): DualPipeline {
   const ctxRef = useRef<ContextWithSink | null>(null);
   const gainARef = useRef<GainNode | null>(null);
   const gainBRef = useRef<GainNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const secondaryDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const secondaryAudioRef = useRef<AudioElementWithSink | null>(null);
   const channelRef = useRef<"A" | "B">(initialChannel);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -172,10 +185,22 @@ export function useMasterDualPipeline(
       gainB.connect(analyser);
       analyser.connect(ctx.destination);
 
+      // Tap for the optional secondary output. We always create the tap
+      // so toggling the secondary device on/off later doesn't require
+      // reinitialising the graph; the hidden <audio> sink stays paused
+      // until a device id is set.
+      const secondaryDest = ctx.createMediaStreamDestination();
+      analyser.connect(secondaryDest);
+      const secondaryAudio = new Audio() as AudioElementWithSink;
+      secondaryAudio.srcObject = secondaryDest.stream;
+      secondaryAudio.autoplay = false;
+
       ctxRef.current = ctx;
       gainARef.current = gainA;
       gainBRef.current = gainB;
       analyserRef.current = analyser;
+      secondaryDestRef.current = secondaryDest;
+      secondaryAudioRef.current = secondaryAudio;
       setReady(true);
     } catch (e) {
       setError(
@@ -185,6 +210,15 @@ export function useMasterDualPipeline(
       );
     }
     return () => {
+      const audio = secondaryAudioRef.current;
+      if (audio) {
+        try {
+          audio.pause();
+          audio.srcObject = null;
+        } catch {
+          // ignore
+        }
+      }
       const ctx = ctxRef.current;
       if (ctx) {
         try {
@@ -197,10 +231,12 @@ export function useMasterDualPipeline(
       gainARef.current = null;
       gainBRef.current = null;
       analyserRef.current = null;
+      secondaryDestRef.current = null;
+      secondaryAudioRef.current = null;
     };
   }, [audioARef, audioBRef]);
 
-  // Apply sink whenever device changes.
+  // Apply primary sink whenever device changes.
   useEffect(() => {
     const ctx = ctxRef.current;
     if (!ctx) return;
@@ -226,6 +262,39 @@ export function useMasterDualPipeline(
         setError(`setSinkId: ${msg}`);
       });
   }, [deviceId]);
+
+  // Apply secondary sink. Pauses the hidden element when no device is
+  // selected so we don't waste CPU running a sink we'd never hear.
+  useEffect(() => {
+    const audio = secondaryAudioRef.current;
+    if (!audio) return;
+    if (!secondaryDeviceId) {
+      try {
+        audio.pause();
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    if (typeof audio.setSinkId !== "function") {
+      setError("HTMLAudioElement.setSinkId unsupported on secondary output");
+      return;
+    }
+    audio
+      .setSinkId(secondaryDeviceId)
+      .then(() => audio.play())
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (
+          msg.includes("going away") ||
+          msg.includes("closed") ||
+          msg.includes("InvalidStateError")
+        ) {
+          return;
+        }
+        setError(`secondary setSinkId: ${msg}`);
+      });
+  }, [secondaryDeviceId]);
 
   const setActiveChannel = useCallback(
     (channel: "A" | "B", instant = false) => {
